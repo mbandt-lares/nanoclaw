@@ -36,3 +36,15 @@ groups/global/*
 .nanoclaw/
 
 agents-sdk-docs
+
+# Local secrets & keys (never commit)
+.ssh_key
+.known_hosts
+.claude/settings.local.json
+config.json
+
+# Python venvs
+a2a-venv/
+
+# Backups (local only)
+backups/

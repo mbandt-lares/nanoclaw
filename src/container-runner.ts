@@ -20,8 +20,12 @@ import { resolveGroupFolderPath, resolveGroupIpcPath } from './group-folder.js';
 import { logger } from './logger.js';
 import {
   CONTAINER_RUNTIME_BIN,
+  canUseBindMounts,
   readonlyMountArgs,
+  retrieveFromVolume,
+  stageToVolume,
   stopContainer,
+  removeVolume,
 } from './container-runtime.js';
 import { validateAdditionalMounts } from './mount-security.js';
 import { RegisteredGroup } from './types.js';
@@ -52,6 +56,10 @@ interface VolumeMount {
   hostPath: string;
   containerPath: string;
   readonly: boolean;
+  /** When using volume staging, the Docker volume name for this mount. */
+  volumeName?: string;
+  /** Patterns to exclude when staging files (e.g., '.env' for secrets). */
+  excludePatterns?: string[];
 }
 
 function buildVolumeMounts(
@@ -72,18 +80,10 @@ function buildVolumeMounts(
       hostPath: projectRoot,
       containerPath: '/workspace/project',
       readonly: true,
+      // Exclude .env from staging so agent cannot read secrets.
+      // Secrets are passed via stdin instead (see readSecrets()).
+      excludePatterns: ['.env', 'node_modules', '.git'],
     });
-
-    // Shadow .env so the agent cannot read secrets from the mounted project root.
-    // Secrets are passed via stdin instead (see readSecrets()).
-    const envFile = path.join(projectRoot, '.env');
-    if (fs.existsSync(envFile)) {
-      mounts.push({
-        hostPath: '/dev/null',
-        containerPath: '/workspace/project/.env',
-        readonly: true,
-      });
-    }
 
     // Main also gets its group folder as the working directory
     mounts.push({
@@ -98,17 +98,17 @@ function buildVolumeMounts(
       containerPath: '/workspace/group',
       readonly: false,
     });
+  }
 
-    // Global memory directory (read-only for non-main)
-    // Only directory mounts are supported, not file mounts
-    const globalDir = path.join(GROUPS_DIR, 'global');
-    if (fs.existsSync(globalDir)) {
-      mounts.push({
-        hostPath: globalDir,
-        containerPath: '/workspace/global',
-        readonly: true,
-      });
-    }
+  // Global memory directory (read-only for all groups)
+  // Contains the single-source CLAUDE.md with skills and persona
+  const globalDir = path.join(GROUPS_DIR, 'global');
+  if (fs.existsSync(globalDir)) {
+    mounts.push({
+      hostPath: globalDir,
+      containerPath: '/workspace/global',
+      readonly: true,
+    });
   }
 
   // Per-group Claude sessions directory (isolated from other groups)
@@ -197,6 +197,37 @@ function buildVolumeMounts(
     readonly: false,
   });
 
+  // Mount SSH credentials if they exist (for skills that need SSH access)
+  const sshKeyPath = path.join(projectRoot, '.ssh_key');
+  const sshKnownHostsPath = path.join(projectRoot, '.known_hosts');
+  if (fs.existsSync(sshKeyPath) || fs.existsSync(sshKnownHostsPath)) {
+    // Stage SSH files into a directory that can be mounted as a volume
+    const sshDir = path.join(DATA_DIR, 'ssh');
+    fs.mkdirSync(sshDir, { recursive: true });
+    if (fs.existsSync(sshKeyPath)) {
+      fs.copyFileSync(sshKeyPath, path.join(sshDir, 'ssh_key'));
+      fs.chmodSync(path.join(sshDir, 'ssh_key'), 0o600);
+    }
+    if (fs.existsSync(sshKnownHostsPath)) {
+      fs.copyFileSync(sshKnownHostsPath, path.join(sshDir, 'known_hosts'));
+    }
+    mounts.push({
+      hostPath: sshDir,
+      containerPath: '/home/node/.ssh',
+      readonly: true,
+    });
+  }
+
+  // Mount A2A tools into container (CLI + base module for agent-to-agent communication)
+  const a2aDir = '/home/nanoclaw/reports/a2a';
+  if (fs.existsSync(a2aDir)) {
+    mounts.push({
+      hostPath: a2aDir,
+      containerPath: '/workspace/a2a',
+      readonly: true,
+    });
+  }
+
   // Additional mounts validated against external allowlist (tamper-proof from containers)
   if (group.containerConfig?.additionalMounts) {
     const validatedMounts = validateAdditionalMounts(
@@ -213,6 +244,11 @@ function buildVolumeMounts(
 /**
  * Read allowed secrets from .env for passing to the container via stdin.
  * Secrets are never written to disk or mounted as files.
+ *
+ * SLACK_BOT_TOKEN is included so agents can download files uploaded to Slack
+ * channels (e.g., .app.zip builds). The agent uses curl with
+ * Authorization: Bearer <token> to fetch from url_private_download URLs.
+ * Without this, file downloads fail silently (F030 incident, 2026-03-11).
  */
 function readSecrets(): Record<string, string> {
   return readEnvFile([
@@ -220,6 +256,7 @@ function readSecrets(): Record<string, string> {
     'ANTHROPIC_API_KEY',
     'ANTHROPIC_BASE_URL',
     'ANTHROPIC_AUTH_TOKEN',
+    'SLACK_BOT_TOKEN',
   ]);
 }
 
@@ -227,7 +264,7 @@ function buildContainerArgs(
   mounts: VolumeMount[],
   containerName: string,
 ): string[] {
-  const args: string[] = ['run', '-i', '--rm', '--name', containerName];
+  const args: string[] = ['run', '-i', '--rm', '--runtime=runsc', '--name', containerName];
 
   // Pass host timezone so container's local time matches the user's
   args.push('-e', `TZ=${TIMEZONE}`);
@@ -243,7 +280,11 @@ function buildContainerArgs(
   }
 
   for (const mount of mounts) {
-    if (mount.readonly) {
+    if (mount.volumeName) {
+      // Docker volume mount (used when bind mounts don't work)
+      const ro = mount.readonly ? ':ro' : '';
+      args.push('-v', `${mount.volumeName}:${mount.containerPath}${ro}`);
+    } else if (mount.readonly) {
       args.push(...readonlyMountArgs(mount.hostPath, mount.containerPath));
     } else {
       args.push('-v', `${mount.hostPath}:${mount.containerPath}`);
@@ -253,6 +294,35 @@ function buildContainerArgs(
   args.push(CONTAINER_IMAGE);
 
   return args;
+}
+
+/**
+ * When bind mounts don't work (LXC + host Docker), convert host-path mounts
+ * to Docker volume mounts and stage file content into them.
+ */
+function stageVolumes(
+  mounts: VolumeMount[],
+  containerName: string,
+): void {
+  for (const mount of mounts) {
+    const volName = `${containerName}-${mount.containerPath.replace(/\//g, '-').replace(/^-/, '')}`;
+    mount.volumeName = volName;
+    stageToVolume(mount.hostPath, volName, mount.excludePatterns);
+  }
+}
+
+/**
+ * After container execution, retrieve writable volume data back to host paths
+ * and clean up all volumes.
+ */
+function unstageVolumes(mounts: VolumeMount[]): void {
+  for (const mount of mounts) {
+    if (!mount.volumeName) continue;
+    if (!mount.readonly) {
+      retrieveFromVolume(mount.volumeName, mount.hostPath);
+    }
+    removeVolume(mount.volumeName);
+  }
 }
 
 export async function runContainerAgent(
@@ -269,6 +339,13 @@ export async function runContainerAgent(
   const mounts = buildVolumeMounts(group, input.isMain);
   const safeName = group.folder.replace(/[^a-zA-Z0-9-]/g, '-');
   const containerName = `nanoclaw-${safeName}-${Date.now()}`;
+
+  // Stage files into Docker volumes if bind mounts don't work (LXC + host Docker)
+  const useStaging = !canUseBindMounts();
+  if (useStaging) {
+    stageVolumes(mounts, containerName);
+  }
+
   const containerArgs = buildContainerArgs(mounts, containerName);
 
   logger.debug(
@@ -429,6 +506,16 @@ export async function runContainerAgent(
 
     container.on('close', (code) => {
       clearTimeout(timeout);
+
+      // Retrieve writable data from Docker volumes back to host paths
+      if (useStaging) {
+        try {
+          unstageVolumes(mounts);
+        } catch (err) {
+          logger.warn({ group: group.name, err }, 'Failed to unstage volumes');
+        }
+      }
+
       const duration = Date.now() - startTime;
 
       if (timedOut) {

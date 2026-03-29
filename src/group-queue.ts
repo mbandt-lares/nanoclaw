@@ -3,6 +3,7 @@ import fs from 'fs';
 import path from 'path';
 
 import { DATA_DIR, MAX_CONCURRENT_CONTAINERS } from './config.js';
+import { canUseBindMounts, copyToContainer } from './container-runtime.js';
 import { logger } from './logger.js';
 
 interface QueuedTask {
@@ -165,6 +166,11 @@ export class GroupQueue {
       const tempPath = `${filepath}.tmp`;
       fs.writeFileSync(tempPath, JSON.stringify({ type: 'message', text }));
       fs.renameSync(tempPath, filepath);
+
+      // When bind mounts don't work, copy the file into the running container
+      if (!canUseBindMounts() && state.containerName) {
+        copyToContainer(state.containerName, filepath, `/workspace/ipc/input/${filename}`);
+      }
       return true;
     } catch {
       return false;
@@ -181,7 +187,13 @@ export class GroupQueue {
     const inputDir = path.join(DATA_DIR, 'ipc', state.groupFolder, 'input');
     try {
       fs.mkdirSync(inputDir, { recursive: true });
-      fs.writeFileSync(path.join(inputDir, '_close'), '');
+      const closePath = path.join(inputDir, '_close');
+      fs.writeFileSync(closePath, '');
+
+      // When bind mounts don't work, copy the sentinel into the running container
+      if (!canUseBindMounts() && state.containerName) {
+        copyToContainer(state.containerName, closePath, '/workspace/ipc/input/_close');
+      }
     } catch {
       // ignore
     }

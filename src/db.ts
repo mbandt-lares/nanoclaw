@@ -544,6 +544,7 @@ export function getRegisteredGroup(
         container_config: string | null;
         requires_trigger: number | null;
         is_main: number | null;
+        session_resume: number | null;
       }
     | undefined;
   if (!row) return undefined;
@@ -566,6 +567,8 @@ export function getRegisteredGroup(
     requiresTrigger:
       row.requires_trigger === null ? undefined : row.requires_trigger === 1,
     isMain: row.is_main === 1 ? true : undefined,
+    sessionResume:
+      row.session_resume === null ? undefined : row.session_resume === 1,
   };
 }
 
@@ -598,6 +601,7 @@ export function getAllRegisteredGroups(): Record<string, RegisteredGroup> {
     container_config: string | null;
     requires_trigger: number | null;
     is_main: number | null;
+    session_resume: number | null;
   }>;
   const result: Record<string, RegisteredGroup> = {};
   for (const row of rows) {
@@ -619,6 +623,8 @@ export function getAllRegisteredGroups(): Record<string, RegisteredGroup> {
       requiresTrigger:
         row.requires_trigger === null ? undefined : row.requires_trigger === 1,
       isMain: row.is_main === 1 ? true : undefined,
+      sessionResume:
+        row.session_resume === null ? undefined : row.session_resume === 1,
     };
   }
   return result;

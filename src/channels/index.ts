@@ -6,7 +6,12 @@
 // gmail
 
 // slack
+import './slack.js';
 
 // telegram
+import './telegram.js';
+
+// webchat
+import './webchat.js';
 
 // whatsapp

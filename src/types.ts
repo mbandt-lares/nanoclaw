@@ -40,6 +40,24 @@ export interface RegisteredGroup {
   containerConfig?: ContainerConfig;
   requiresTrigger?: boolean; // Default: true for groups, false for solo chats
   isMain?: boolean; // True for the main control group (no trigger, elevated privileges)
+  sessionResume?: boolean; // Default: true. Set false to start fresh each invocation.
+}
+
+export interface FileAttachment {
+  /** Slack file ID */
+  id: string;
+  /** Original filename (e.g., "LaresCare.app.zip") */
+  name: string;
+  /** File size in bytes */
+  size: number;
+  /** MIME type (e.g., "application/zip") */
+  mimetype: string;
+  /** Slack file type (e.g., "zip") */
+  filetype: string;
+  /** Authenticated download URL — requires bot token in Authorization header */
+  url_private_download?: string;
+  /** Direct permalink in Slack */
+  permalink?: string;
 }
 
 export interface NewMessage {
@@ -51,6 +69,8 @@ export interface NewMessage {
   timestamp: string;
   is_from_me?: boolean;
   is_bot_message?: boolean;
+  /** File attachments from Slack uploads */
+  files?: FileAttachment[];
 }
 
 export interface ScheduledTask {

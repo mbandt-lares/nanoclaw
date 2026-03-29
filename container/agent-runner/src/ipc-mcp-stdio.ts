@@ -280,6 +280,113 @@ Use available_groups.json to find the JID for a group. The folder name must be c
   },
 );
 
+// ─── A2A (Agent-to-Agent) tools ───────────────────────────────────────────────
+// These let agents inside containers discover and call other agents in the swarm.
+// The A2A registry runs at the LXD container gateway; agents can also call
+// specific agents directly by URL.
+
+import { execSync } from 'child_process';
+
+const A2A_REGISTRY = process.env.A2A_REGISTRY_URL || 'http://10.31.220.241:8200';
+const A2A_CLI = '/workspace/a2a/a2a_cli.py';
+
+function a2aRequest(urlPath: string, method = 'GET', body?: object): object {
+  const url = `${A2A_REGISTRY}${urlPath}`;
+  if (method === 'GET') {
+    const raw = execSync(`curl -sf --max-time 10 '${url}'`, { encoding: 'utf-8' });
+    return JSON.parse(raw);
+  }
+  const payload = JSON.stringify(body);
+  const raw = execSync(
+    `curl -sf --max-time 30 -X POST -H 'Content-Type: application/json' -d '${payload.replace(/'/g, "\\'")}' '${url}'`,
+    { encoding: 'utf-8' },
+  );
+  return JSON.parse(raw);
+}
+
+server.tool(
+  'a2a_discover',
+  `Discover other agents in the vine swarm via A2A protocol. Returns Agent Cards showing each agent's name, capabilities, and skills. Use this to find which agent can handle a task before calling a2a_task.
+
+Available agents include: security-master (audits, policy), resource-manager (costs, capacity), github-worker (repo ops), test-runner (test execution), synthetic-patient (persona messages), vine-server (test specs, reports), claude-code-host (host operations).`,
+  {
+    agent_name: z.string().optional().describe('Specific agent name to look up, or omit for all agents'),
+  },
+  async (args) => {
+    try {
+      const urlPath = args.agent_name ? `/agents/${args.agent_name}` : '/agents';
+      const result = a2aRequest(urlPath);
+      return { content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }] };
+    } catch (err) {
+      return {
+        content: [{ type: 'text' as const, text: `A2A discovery failed: ${err instanceof Error ? err.message : String(err)}` }],
+        isError: true,
+      };
+    }
+  },
+);
+
+server.tool(
+  'a2a_task',
+  `Send a task to another agent via A2A protocol. The target agent executes the skill and returns results.
+
+Example: a2a_task({agent: "security-master", skill: "audit-containers", input: {}})
+Example: a2a_task({agent: "resource-manager", skill: "get-costs", input: {"period": "today"}})
+Example: a2a_task({agent: "synthetic-patient", skill: "generate-message", input: {"persona_id": "marc", "scenario": "high bp"}})`,
+  {
+    agent: z.string().describe('Target agent name (e.g., "security-master", "resource-manager")'),
+    skill: z.string().describe('Skill ID to invoke on the target agent'),
+    input: z.string().default('{}').describe('Input parameters as JSON string (e.g., "{\"persona_id\": \"marc\"}"). Defaults to empty object.'),
+  },
+  async (args) => {
+    try {
+      // First discover the agent to get its URL
+      const card = a2aRequest(`/agents/${args.agent}`) as { url?: string };
+      const agentUrl = card.url || `${A2A_REGISTRY}`;
+
+      // Send JSON-RPC task
+      const taskId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const rpcBody = {
+        jsonrpc: '2.0',
+        id: taskId,
+        method: 'tasks/send',
+        params: {
+          id: taskId,
+          skill: args.skill,
+          input: JSON.parse(args.input || '{}'),
+        },
+      };
+
+      const result = a2aRequest('/task', 'POST', rpcBody);
+      return { content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }] };
+    } catch (err) {
+      return {
+        content: [{ type: 'text' as const, text: `A2A task failed: ${err instanceof Error ? err.message : String(err)}` }],
+        isError: true,
+      };
+    }
+  },
+);
+
+server.tool(
+  'a2a_health',
+  'Check health of the A2A agent swarm. Returns status of all agents (online/offline), MQTT connection state, and agent count.',
+  {},
+  async () => {
+    try {
+      const result = a2aRequest('/health');
+      return { content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }] };
+    } catch (err) {
+      return {
+        content: [{ type: 'text' as const, text: `A2A health check failed: ${err instanceof Error ? err.message : String(err)}` }],
+        isError: true,
+      };
+    }
+  },
+);
+
+// ─── End A2A tools ───────────────────────────────────────────────────────────
+
 // Start the stdio transport
 const transport = new StdioServerTransport();
 await server.connect(transport);

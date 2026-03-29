@@ -44,6 +44,8 @@ import { findChannel, formatMessages, formatOutbound } from './router.js';
 import { startSchedulerLoop } from './task-scheduler.js';
 import { Channel, NewMessage, RegisteredGroup } from './types.js';
 import { logger } from './logger.js';
+import { ensureValidToken, startTokenRefreshLoop, stopTokenRefreshLoop } from './token-refresh.js';
+import { A2AHostServer } from './a2a-server.js';
 
 // Re-export for backwards compatibility during refactor
 export { escapeXml, formatMessages } from './router.js';
@@ -253,7 +255,7 @@ async function runAgent(
   onOutput?: (output: ContainerOutput) => Promise<void>,
 ): Promise<'success' | 'error'> {
   const isMain = group.isMain === true;
-  const sessionId = sessions[group.folder];
+  const sessionId = group.sessionResume === false ? undefined : sessions[group.folder];
 
   // Update tasks snapshot for container to read (filtered by group)
   const tasks = getAllTasks();
@@ -453,9 +455,19 @@ async function main(): Promise<void> {
   logger.info('Database initialized');
   loadState();
 
+  // Start A2A host server (agent-to-agent protocol for container agents)
+  const a2aServer = new A2AHostServer(4002);
+  a2aServer.start();
+
+  // Refresh OAuth token if needed, then start background refresh loop
+  await ensureValidToken();
+  startTokenRefreshLoop();
+
   // Graceful shutdown handlers
   const shutdown = async (signal: string) => {
     logger.info({ signal }, 'Shutdown signal received');
+    a2aServer.stop();
+    stopTokenRefreshLoop();
     await queue.shutdown(10000);
     for (const ch of channels) await ch.disconnect();
     process.exit(0);
