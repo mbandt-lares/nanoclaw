@@ -169,7 +169,11 @@ export class GroupQueue {
 
       // When bind mounts don't work, copy the file into the running container
       if (!canUseBindMounts() && state.containerName) {
-        copyToContainer(state.containerName, filepath, `/workspace/ipc/input/${filename}`);
+        copyToContainer(
+          state.containerName,
+          filepath,
+          `/workspace/ipc/input/${filename}`,
+        );
       }
       return true;
     } catch {
@@ -192,7 +196,11 @@ export class GroupQueue {
 
       // When bind mounts don't work, copy the sentinel into the running container
       if (!canUseBindMounts() && state.containerName) {
-        copyToContainer(state.containerName, closePath, '/workspace/ipc/input/_close');
+        copyToContainer(
+          state.containerName,
+          closePath,
+          '/workspace/ipc/input/_close',
+        );
       }
     } catch {
       // ignore

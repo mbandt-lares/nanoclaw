@@ -44,7 +44,11 @@ import { findChannel, formatMessages, formatOutbound } from './router.js';
 import { startSchedulerLoop } from './task-scheduler.js';
 import { Channel, NewMessage, RegisteredGroup } from './types.js';
 import { logger } from './logger.js';
-import { ensureValidToken, startTokenRefreshLoop, stopTokenRefreshLoop } from './token-refresh.js';
+import {
+  ensureValidToken,
+  startTokenRefreshLoop,
+  stopTokenRefreshLoop,
+} from './token-refresh.js';
 import { A2AHostServer } from './a2a-server.js';
 
 // Re-export for backwards compatibility during refactor
@@ -255,7 +259,8 @@ async function runAgent(
   onOutput?: (output: ContainerOutput) => Promise<void>,
 ): Promise<'success' | 'error'> {
   const isMain = group.isMain === true;
-  const sessionId = group.sessionResume === false ? undefined : sessions[group.folder];
+  const sessionId =
+    group.sessionResume === false ? undefined : sessions[group.folder];
 
   // Update tasks snapshot for container to read (filtered by group)
   const tasks = getAllTasks();

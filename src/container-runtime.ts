@@ -27,21 +27,35 @@ export function canUseBindMounts(): boolean {
     fs.mkdirSync(testDir, { recursive: true });
     fs.writeFileSync(testFile, 'bind-mount-probe');
 
-    const result = spawnSync(CONTAINER_RUNTIME_BIN, [
-      'run', '--rm',
-      '-v', `${testDir}:/probe:ro`,
-      'alpine', 'cat', '/probe/probe.txt',
-    ], { stdio: ['pipe', 'pipe', 'pipe'], timeout: 15000 });
+    const result = spawnSync(
+      CONTAINER_RUNTIME_BIN,
+      [
+        'run',
+        '--rm',
+        '-v',
+        `${testDir}:/probe:ro`,
+        'alpine',
+        'cat',
+        '/probe/probe.txt',
+      ],
+      { stdio: ['pipe', 'pipe', 'pipe'], timeout: 15000 },
+    );
 
     _bindMountsWork = result.stdout?.toString().trim() === 'bind-mount-probe';
   } catch {
     _bindMountsWork = false;
   } finally {
-    try { fs.rmSync(testDir, { recursive: true }); } catch { /* ignore */ }
+    try {
+      fs.rmSync(testDir, { recursive: true });
+    } catch {
+      /* ignore */
+    }
   }
 
   if (!_bindMountsWork) {
-    logger.info('Bind mounts not available (LXC/rootless Docker); using volume staging');
+    logger.info(
+      'Bind mounts not available (LXC/rootless Docker); using volume staging',
+    );
   }
   return _bindMountsWork;
 }
@@ -78,15 +92,25 @@ export function stageToVolume(
     });
 
     if (tar.stdout && tar.stdout.length > 0) {
-      const result = spawnSync(CONTAINER_RUNTIME_BIN, [
-        'run', '--rm', '-i',
-        '-v', `${volumeName}:/target`,
-        'alpine', 'sh', '-c', 'cd /target && tar xf - && chown -R 1000:1000 /target',
-      ], {
-        input: tar.stdout,
-        stdio: ['pipe', 'pipe', 'pipe'],
-        timeout: 30000,
-      });
+      const result = spawnSync(
+        CONTAINER_RUNTIME_BIN,
+        [
+          'run',
+          '--rm',
+          '-i',
+          '-v',
+          `${volumeName}:/target`,
+          'alpine',
+          'sh',
+          '-c',
+          'cd /target && tar xf - && chown -R 1000:1000 /target',
+        ],
+        {
+          input: tar.stdout,
+          stdio: ['pipe', 'pipe', 'pipe'],
+          timeout: 30000,
+        },
+      );
 
       if (result.status !== 0) {
         logger.warn(
@@ -97,11 +121,20 @@ export function stageToVolume(
     }
   } else {
     // Empty directory — just ensure the volume root is writable by node user
-    spawnSync(CONTAINER_RUNTIME_BIN, [
-      'run', '--rm',
-      '-v', `${volumeName}:/target`,
-      'alpine', 'chown', '1000:1000', '/target',
-    ], { stdio: 'pipe', timeout: 15000 });
+    spawnSync(
+      CONTAINER_RUNTIME_BIN,
+      [
+        'run',
+        '--rm',
+        '-v',
+        `${volumeName}:/target`,
+        'alpine',
+        'chown',
+        '1000:1000',
+        '/target',
+      ],
+      { stdio: 'pipe', timeout: 15000 },
+    );
   }
 }
 
@@ -112,15 +145,27 @@ export function stageToVolume(
 export function retrieveFromVolume(volumeName: string, hostDir: string): void {
   fs.mkdirSync(hostDir, { recursive: true });
 
-  const result = spawnSync(CONTAINER_RUNTIME_BIN, [
-    'run', '--rm',
-    '-v', `${volumeName}:/source:ro`,
-    'alpine', 'tar', 'cf', '-', '-C', '/source', '.',
-  ], {
-    stdio: ['pipe', 'pipe', 'pipe'],
-    maxBuffer: 100 * 1024 * 1024,
-    timeout: 30000,
-  });
+  const result = spawnSync(
+    CONTAINER_RUNTIME_BIN,
+    [
+      'run',
+      '--rm',
+      '-v',
+      `${volumeName}:/source:ro`,
+      'alpine',
+      'tar',
+      'cf',
+      '-',
+      '-C',
+      '/source',
+      '.',
+    ],
+    {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      maxBuffer: 100 * 1024 * 1024,
+      timeout: 30000,
+    },
+  );
 
   if (result.status === 0 && result.stdout && result.stdout.length > 0) {
     const untar = spawnSync('tar', ['xf', '-', '-C', hostDir], {
@@ -146,7 +191,9 @@ export function removeVolume(volumeName: string): void {
       stdio: 'pipe',
       timeout: 10000,
     });
-  } catch { /* ignore */ }
+  } catch {
+    /* ignore */
+  }
 }
 
 /**
@@ -161,10 +208,11 @@ export function copyToContainer(
 ): boolean {
   try {
     const content = fs.readFileSync(hostPath);
-    const result = spawnSync(CONTAINER_RUNTIME_BIN, [
-      'exec', '-i', containerName,
-      'sh', '-c', `cat > '${containerPath}'`,
-    ], { input: content, stdio: ['pipe', 'pipe', 'pipe'], timeout: 5000 });
+    const result = spawnSync(
+      CONTAINER_RUNTIME_BIN,
+      ['exec', '-i', containerName, 'sh', '-c', `cat > '${containerPath}'`],
+      { input: content, stdio: ['pipe', 'pipe', 'pipe'], timeout: 5000 },
+    );
     return result.status === 0;
   } catch {
     return false;
