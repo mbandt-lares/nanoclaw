@@ -23,6 +23,7 @@ import { execSync } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 import { logger } from './logger.js';
+import { logTaskRun, updateTaskAfterRun } from './db.js';
 
 // JSON-RPC error codes
 const JSONRPC_PARSE_ERROR = -32700;
@@ -118,6 +119,20 @@ export class A2AHostServer {
             description: 'Execute a shell command.',
             inputModes: ['application/json'],
             outputModes: ['application/json'],
+          },
+          {
+            id: 'task.complete',
+            name: 'Task Completion Callback',
+            description: 'Called by external workers to record task completion in scheduled_tasks. Input: task_id (string), status (success|error), result (string, optional), error (string, optional), duration_ms (number, optional).',
+            inputModes: ['application/json'],
+            outputModes: ['application/json'],
+            input: {
+              task_id: 'string',
+              status: 'string',
+              result: 'string',
+              error: 'string',
+              duration_ms: 'number',
+            },
           },
         ],
         defaultInputModes: ['application/json'],
@@ -481,6 +496,9 @@ export class A2AHostServer {
           'A2A execute-task queued',
         );
         break;
+      case 'task.complete':
+        this.executeTaskComplete(task);
+        break;
       default:
         task.status = 'failed';
         task.result = { error: `Unknown skill: ${task.skill}` };
@@ -593,6 +611,50 @@ export class A2AHostServer {
       }
     }
     task.updated_at = nowISO();
+  }
+
+  /**
+   * Record a task completion event from an external worker.
+   * Writes a run log entry and updates the task's last-run summary.
+   */
+  private executeTaskComplete(task: A2ATask): void {
+    const taskId = task.input.task_id as string;
+    const status = (task.input.status as string) || 'success';
+    const result = (task.input.result as string) || null;
+    const error = (task.input.error as string) || null;
+    const durationMs = (task.input.duration_ms as number) || 0;
+
+    if (!taskId) {
+      task.status = 'failed';
+      task.result = { error: 'Missing task_id in input' };
+      return;
+    }
+
+    try {
+      const runAt = new Date().toISOString();
+
+      logTaskRun({
+        task_id: taskId,
+        run_at: runAt,
+        duration_ms: durationMs,
+        status: status === 'success' ? 'success' : 'error',
+        result: result,
+        error: error,
+      });
+
+      const nextRun = null; // one-shot external tasks don't reschedule
+      const summary = error ? `Error: ${error}` : result ? result.slice(0, 200) : 'Completed';
+      updateTaskAfterRun(taskId, nextRun, summary);
+
+      task.status = 'completed';
+      task.result = { task_id: taskId, status, recorded: true };
+      logger.info({ taskId, status }, 'External worker completion recorded');
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      task.status = 'failed';
+      task.result = { error: `Failed to record completion: ${errMsg}` };
+      logger.error({ taskId, err }, 'Failed to record task completion');
+    }
   }
 
   // --- HTTP helpers ---
