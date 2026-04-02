@@ -62,6 +62,17 @@ interface AgentCardData {
   authentication: Record<string, unknown>;
 }
 
+export interface A2AHostServerOptions {
+  port?: number;
+  /**
+   * Callback invoked when an `execute-task` skill request arrives.
+   * Receives the prompt string and the task ID; should return a result
+   * string when the work completes.  If not provided, execute-task
+   * requests are rejected immediately with a clear error.
+   */
+  onExecuteTask?: (prompt: string, taskId: string) => Promise<string>;
+}
+
 function nowISO(): string {
   return new Date().toISOString();
 }
@@ -77,59 +88,91 @@ export class A2AHostServer {
   private agentCards: Map<string, AgentCardData> = new Map();
   private hostCard: AgentCardData;
   private hostCardJson: string;
+  private onExecuteTask?: (prompt: string, taskId: string) => Promise<string>;
 
-  constructor(port = 8200) {
-    this.port = port;
+  constructor(hostCard: AgentCardData, options: A2AHostServerOptions = {});
+  /** @deprecated Pass a hostCard object as first arg. */
+  constructor(port?: number);
+  constructor(
+    hostCardOrPort: AgentCardData | number | undefined,
+    options: A2AHostServerOptions = {},
+  ) {
+    // Support old single-number-arg call signature used before this change:
+    //   new A2AHostServer(4002)
+    if (typeof hostCardOrPort === 'number' || hostCardOrPort === undefined) {
+      this.port = hostCardOrPort ?? 4002;
+      this.onExecuteTask = undefined;
 
-    // Load host card from the agent-cards directory
-    const cardPath = '/home/nanoclaw/reports/a2a/agent-cards/claude-code-host.json';
-    if (fs.existsSync(cardPath)) {
-      this.hostCard = JSON.parse(fs.readFileSync(cardPath, 'utf-8'));
+      // Load host card from the agent-cards directory
+      const cardPath = '/home/nanoclaw/reports/a2a/agent-cards/claude-code-host.json';
+      if (fs.existsSync(cardPath)) {
+        this.hostCard = JSON.parse(fs.readFileSync(cardPath, 'utf-8'));
+      } else {
+        this.hostCard = this.defaultHostCard(this.port);
+      }
     } else {
-      this.hostCard = {
-        name: 'claude-code-host',
-        description:
-          'Host Claude Code on Miniforum. Orchestrator for vine agent swarm.',
-        url: `http://127.0.0.1:${port}`,
-        version: '0.3',
-        capabilities: {
-          streaming: false,
-          pushNotifications: false,
-          stateTransitionHistory: true,
-        },
-        skills: [
-          {
-            id: 'execute-task',
-            name: 'Execute Task',
-            description: 'Execute an arbitrary task using Claude Code.',
-            inputModes: ['application/json'],
-            outputModes: ['application/json'],
-          },
-          {
-            id: 'query-codebase',
-            name: 'Query Codebase',
-            description: 'Search and analyze code.',
-            inputModes: ['application/json'],
-            outputModes: ['application/json'],
-          },
-          {
-            id: 'run-command',
-            name: 'Run Command',
-            description: 'Execute a shell command.',
-            inputModes: ['application/json'],
-            outputModes: ['application/json'],
-          },
-        ],
-        defaultInputModes: ['application/json'],
-        defaultOutputModes: ['application/json'],
-        authentication: { schemes: ['bearer'], credentials: 'vine-internal' },
-      };
+      // New call signature: new A2AHostServer(hostCard, options)
+      this.hostCard = hostCardOrPort;
+      this.port = options.port ?? 4002;
+      this.onExecuteTask = options.onExecuteTask;
     }
 
     this.hostCardJson = JSON.stringify(this.hostCard, null, 2);
 
     // Load all known agent cards from disk
     this.loadAgentCards();
+  }
+
+  private defaultHostCard(port: number): AgentCardData {
+    return {
+      name: 'claude-code-host',
+      description:
+        'Host Claude Code on Miniforum. Orchestrator for vine agent swarm.',
+      url: `http://127.0.0.1:${port}`,
+      version: '0.3',
+      capabilities: {
+        streaming: false,
+        pushNotifications: false,
+        stateTransitionHistory: true,
+      },
+      skills: [
+        {
+          id: 'execute-task',
+          name: 'Execute Task',
+          description: 'Execute an arbitrary task using Claude Code.',
+          inputModes: ['application/json'],
+          outputModes: ['application/json'],
+        },
+        {
+          id: 'query-codebase',
+          name: 'Query Codebase',
+          description: 'Search and analyze code.',
+          inputModes: ['application/json'],
+          outputModes: ['application/json'],
+        },
+        {
+          id: 'run-command',
+          name: 'Run Command',
+          description: 'Execute a shell command.',
+          inputModes: ['application/json'],
+          outputModes: ['application/json'],
+        },
+      ],
+      defaultInputModes: ['application/json'],
+      defaultOutputModes: ['application/json'],
+      authentication: { schemes: ['bearer'], credentials: 'vine-internal' },
+    };
+  }
+
+  /**
+   * Wire in the execute-task callback after construction.
+   * Useful when the callback depends on state that isn't available
+   * until after the server object is created (e.g. circular deps).
+   */
+  setExecuteTaskCallback(
+    cb: (prompt: string, taskId: string) => Promise<string>,
+  ): void {
+    this.onExecuteTask = cb;
   }
 
   /**
@@ -374,7 +417,8 @@ export class A2AHostServer {
       metadata,
     };
 
-    // Execute the task based on skill
+    // Execute the task based on skill (may mutate task synchronously or kick
+    // off async work that updates the task later via this.tasks.set)
     try {
       this.executeTask(task);
     } catch (err) {
@@ -462,7 +506,9 @@ export class A2AHostServer {
 
   /**
    * Execute a task based on its skill type.
-   * Mutates the task in place with result/status.
+   * Synchronous skills mutate the task in place.
+   * Async skills (execute-task) set status to 'working' immediately and
+   * update the task map when the promise resolves.
    */
   private executeTask(task: A2ATask): void {
     switch (task.skill) {
@@ -472,15 +518,57 @@ export class A2AHostServer {
       case 'query-codebase':
         this.executeQueryCodebase(task);
         break;
-      case 'execute-task':
-        // For execute-task, we accept and leave as submitted.
-        // A polling host process (or future integration) picks these up.
-        task.status = 'submitted';
+      case 'execute-task': {
+        const prompt =
+          (task.input.prompt as string) ||
+          (task.input.text as string) ||
+          '';
+        if (!prompt) {
+          task.status = 'failed';
+          task.result = { error: 'Missing prompt in input' };
+          return;
+        }
+        if (!this.onExecuteTask) {
+          task.status = 'failed';
+          task.result = {
+            error:
+              'execute-task not wired — onExecuteTask callback not set',
+          };
+          logger.warn(
+            { taskId: task.id },
+            'execute-task called but no callback registered (CLAW-003)',
+          );
+          return;
+        }
+        task.status = 'working';
+        task.updated_at = nowISO();
         logger.info(
-          { taskId: task.id, prompt: (task.input.prompt as string || '').slice(0, 100) },
-          'A2A execute-task queued',
+          { taskId: task.id, promptPreview: prompt.slice(0, 100) },
+          'execute-task dispatching to container runner',
         );
+        // Fire-and-forget: caller polls GET /task/{id} for status
+        this.onExecuteTask(prompt, task.id)
+          .then((result) => {
+            task.status = 'completed';
+            task.result = { output: result };
+            task.updated_at = nowISO();
+            this.tasks.set(task.id, task);
+            logger.info({ taskId: task.id }, 'execute-task completed');
+          })
+          .catch((err) => {
+            task.status = 'failed';
+            task.result = {
+              error: err instanceof Error ? err.message : String(err),
+            };
+            task.updated_at = nowISO();
+            this.tasks.set(task.id, task);
+            logger.error(
+              { taskId: task.id, err },
+              'execute-task failed',
+            );
+          });
         break;
+      }
       default:
         task.status = 'failed';
         task.result = { error: `Unknown skill: ${task.skill}` };

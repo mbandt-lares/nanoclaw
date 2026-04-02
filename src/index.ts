@@ -560,7 +560,56 @@ async function main(): Promise<void> {
   loadState();
 
   // Start A2A host server (agent-to-agent protocol for container agents)
-  const a2aServer = new A2AHostServer(4002);
+  // Build the A2A server with the execute-task callback wired in (CLAW-003).
+  // The callback finds the main group and dispatches the prompt through the
+  // same container runner used by the message loop and task scheduler.
+  const a2aServer = new A2AHostServer(4002, {
+    onExecuteTask: async (prompt: string, taskId: string): Promise<string> => {
+      const mainEntry = Object.entries(registeredGroups).find(
+        ([, g]) => g.isMain === true,
+      );
+      if (!mainEntry) {
+        throw new Error('No main group registered — cannot execute A2A task');
+      }
+      const [mainJid, mainGroup] = mainEntry;
+      logger.info(
+        { taskId, group: mainGroup.name, promptPreview: prompt.slice(0, 100) },
+        'A2A execute-task dispatching via container runner',
+      );
+
+      let result = '';
+      const output = await runContainerAgent(
+        mainGroup,
+        {
+          prompt,
+          sessionId: sessions[mainGroup.folder],
+          groupFolder: mainGroup.folder,
+          chatJid: mainJid,
+          isMain: true,
+          assistantName: ASSISTANT_NAME,
+        },
+        (proc, containerName) =>
+          queue.registerProcess(mainJid, proc, containerName, mainGroup.folder),
+        async (streamedOutput) => {
+          if (streamedOutput.newSessionId) {
+            sessions[mainGroup.folder] = streamedOutput.newSessionId;
+            setSession(mainGroup.folder, streamedOutput.newSessionId);
+          }
+          if (streamedOutput.result) {
+            result = streamedOutput.result;
+          }
+          if (streamedOutput.status === 'success') {
+            queue.notifyIdle(mainJid);
+          }
+        },
+      );
+
+      if (output.status === 'error') {
+        throw new Error(output.error || 'Container agent error');
+      }
+      return result || output.result || '';
+    },
+  });
   a2aServer.start();
 
   // Refresh OAuth token if needed, then start background refresh loop
